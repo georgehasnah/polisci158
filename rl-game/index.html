@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Campaign Trail: Donor Edition — a Q-learning game</title>
+<style>
+  :root { --ink:#1b1f2a; --muted:#6b7280; --line:#e5e7eb; --accent:#2563eb; --good:#16a34a; --bad:#dc2626; --tv:#f59e0b; }
+  body { font-family: -apple-system, system-ui, Segoe UI, Roboto, sans-serif; color:var(--ink); max-width:980px; margin:24px auto; padding:0 16px; line-height:1.45; }
+  h1 { font-size:1.6rem; margin:0 0 4px; } h2 { font-size:1.15rem; margin:28px 0 8px; }
+  p.lead { color:var(--muted); margin-top:0; }
+  .row { display:flex; gap:24px; flex-wrap:wrap; align-items:flex-start; }
+  .board { display:grid; grid-template-columns:repeat(6, 56px); gap:4px; }
+  .cell { width:56px; height:56px; border:1px solid var(--line); border-radius:6px; display:flex; align-items:center; justify-content:center; font-weight:600; position:relative; background:#fff; }
+  .cell.wall { background:#374151; border-color:#374151; }
+  .cell.S { color:var(--bad); } .cell.C { color:var(--good); } .cell.D { color:#7c3aed; } .cell.R { color:var(--tv); }
+  .cell .arrow { position:absolute; bottom:2px; right:4px; font-size:11px; color:var(--muted); }
+  .cell.agent::after, .cell.player::after { content:"●"; position:absolute; top:2px; left:5px; font-size:12px; }
+  .cell.player::after { color:var(--accent); } .cell.agent::after { color:#111; }
+  .legend { font-size:12px; color:var(--muted); margin-top:6px; }
+  .stats { display:flex; gap:18px; margin:10px 0; flex-wrap:wrap; }
+  .stat b { display:block; font-size:1.3rem; } .stat span { font-size:12px; color:var(--muted); }
+  button { font:inherit; padding:6px 12px; border:1px solid var(--line); border-radius:6px; background:#fff; cursor:pointer; }
+  button:hover { background:#f3f4f6; } button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .controls { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0; }
+  .dpad { display:grid; grid-template-columns:repeat(3, 40px); gap:4px; }
+  .dpad button { width:40px; height:40px; padding:0; }
+  table.reward { border-collapse:collapse; font-size:14px; } table.reward td { padding:4px 10px 4px 0; }
+  table.reward input { width:64px; font:inherit; padding:3px 6px; border:1px solid var(--line); border-radius:4px; }
+  select { font:inherit; padding:4px 6px; }
+  canvas { border:1px solid var(--line); border-radius:6px; max-width:100%; }
+  .note { font-size:13px; color:var(--muted); }
+  .pill { display:inline-block; padding:1px 8px; border-radius:999px; background:#eef2ff; color:#3730a3; font-size:12px; }
+</style>
+</head>
+<body>
+
+<h1>Campaign Trail: Donor Edition</h1>
+<p class="lead">A tiny campaign game with a Q-learning agent. Built for POLISCI 158 (AI &amp; Politics), Section 6.
+You're a candidate at headquarters (<b>H</b>). Reach the Capitol (<b>C</b>) within 30 moves. A donor office (<b>D</b>) gives
+money once per game. A rally stage (<b>R</b>) can be used again and again, but needs 3 moves to reset. Scandals (<b>S</b>) end the campaign.
+Dark squares are closed roads.</p>
+
+<h2>1 · Play it yourself</h2>
+<div class="row">
+  <div>
+    <div class="board" id="humanBoard"></div>
+    <div class="legend">H headquarters · C Capitol · D donor office (once) · R rally stage (reopens after 3 moves) · S scandal · dark = closed road</div>
+  </div>
+  <div>
+    <div class="dpad">
+      <span></span><button data-dir="up">↑</button><span></span>
+      <button data-dir="left">←</button><button data-dir="down">↓</button><button data-dir="right">→</button>
+    </div>
+    <div class="controls"><button id="humanNew">New game</button></div>
+    <div class="stats">
+      <div class="stat"><b id="hScore">0</b><span>points (reward)</span></div>
+      <div class="stat"><b id="hMoves">0 / 30</b><span>moves used</span></div>
+      <div class="stat"><b id="hStatus">On the trail</b><span>status</span></div>
+    </div>
+    <div class="note">Arrow keys work too. Best game so far: <span id="hBest">–</span></div>
+  </div>
+</div>
+
+<h2>2 · The reward <span class="pill">the only thing the agent knows about your goal</span></h2>
+<div class="row">
+  <table class="reward">
+    <tr><td>Reach the Capitol</td><td><input type="number" id="rCapitol" step="0.5"></td></tr>
+    <tr><td>Each move</td><td><input type="number" id="rMove" step="0.1"></td></tr>
+    <tr><td>Scandal (campaign ends)</td><td><input type="number" id="rScandal" step="0.5"></td></tr>
+    <tr><td>Donor office (first visit only)</td><td><input type="number" id="rDonor" step="0.5"></td></tr>
+    <tr><td>Each rally</td><td><input type="number" id="rRally" step="0.5"></td></tr>
+    <tr><td>Donor office (every visit after the first)</td><td><input type="number" id="rDonorAgain" step="0.5"></td></tr>
+  </table>
+  <div>
+    <label>Preset: <select id="preset">
+      <option value="default">Default (what the campaign asked for)</option>
+      <option value="rally">Hack option A: reward every rally (+5)</option>
+      <option value="donor">Hack option B: donor pays on every visit (+2)</option>
+    </select></label>
+    <p class="note">Changing any number resets the agent. The game has <b id="stateCount">?</b> states
+      (30 squares × donor visited or not × rally cooldown 0–3).</p>
+    <table class="reward">
+      <tr><td>Explore (ε)</td><td><input type="number" id="pEps" step="0.05" min="0" max="1" value="0.2"></td></tr>
+      <tr><td>Learning rate (α)</td><td><input type="number" id="pAlpha" step="0.05" min="0" max="1" value="0.2"></td></tr>
+      <tr><td>Patience (γ)</td><td><input type="number" id="pGamma" step="0.05" min="0" max="1" value="0.95"></td></tr>
+      <tr><td>Seed</td><td><input type="number" id="pSeed" step="1" value="158"></td></tr>
+    </table>
+  </div>
+</div>
+
+<h2>3 · Train the agent</h2>
+<div class="row">
+  <div>
+    <div class="board" id="agentBoard"></div>
+    <div class="legend">Arrow in each square = the agent's current best move from there (donor not yet visited, rally open).</div>
+  </div>
+  <div>
+    <div class="controls">
+      <button class="primary" id="train100">Train 100 games</button>
+      <button class="primary" id="train1000">Train 1,000 games</button>
+      <button id="resetAgent">Reset agent</button>
+      <button id="watch">Watch it play</button>
+    </div>
+    <div class="stats">
+      <div class="stat"><b id="aGames">0</b><span>training games so far</span></div>
+      <div class="stat"><b id="aResult">–</b><span>its learned game (no exploring)</span></div>
+      <div class="stat"><b id="aPoints">–</b><span>points in that game</span></div>
+    </div>
+    <canvas id="curve" width="520" height="220"></canvas>
+    <div class="note">Each point = average of 50 training games. <span style="color:var(--accent)">— points per game</span> (what the agent maximizes) ·
+      <span style="color:var(--good)">— % reaching the Capitol</span> (what the campaign actually wants) ·
+      <span style="color:var(--tv)">— rallies per game</span></div>
+  </div>
+</div>
+
+<p class="note" style="margin-top:28px">Plain HTML/CSS/JS, no libraries. Tabular Q-learning: ε-greedy exploration, Q starts at 0, ties broken at random, seeded RNG so the same settings give the same result.</p>
+
+<!-- ================= CORE: the game and the learner (no DOM in here, so it also runs in Node) ================= -->
+<script id="core">
+// ---------- The map ----------
+// 6 columns × 5 rows. H = headquarters (start), C = Capitol (goal), D = donor office,
+// R = rally stage, S = scandal, # = closed road, . = open road.
+const MAP = [
+  "H . . # . .",
+  ". S . . R .",
+  ". . # . . .",
+  "# . . S . D",
+  ". . . . # C",
+].map(r => r.split(" "));
+const ROWS = MAP.length, COLS = MAP[0].length;
+const MAX_MOVES = 30;
+const RALLY_COOLDOWN = 3;
+const ACTIONS = ["up", "down", "left", "right"];
+const DELTA = { up:[-1,0], down:[1,0], left:[0,-1], right:[0,1] };
+
+function find(ch) { for (let r=0;r<ROWS;r++) for (let c=0;c<COLS;c++) if (MAP[r][c]===ch) return [r,c]; }
+const START = find("H"), CAPITOL = find("C");
+
+// ---------- The reward ----------
+// This is the ONLY signal the agent gets about what we want.
+// Each part has a comment. The numbers come from the controls on the page.
+const REWARD_PRESETS = {
+  default: { capitol: 10, move: -0.1, scandal: -5, donor: 2, rally: 0, donorAgain: 0 },
+  rally:   { capitol: 10, move: -0.1, scandal: -5, donor: 2, rally: 5, donorAgain: 0 }, // "reward every rally"
+  donor:   { capitol: 10, move: -0.1, scandal: -5, donor: 2, rally: 0, donorAgain: 2 }, // "donor pays every visit"
+};
+let R = Object.assign({}, REWARD_PRESETS.default);
+
+function reward(after, event) {
+  let pts = R.move;                                    // every move costs a little (time passes)
+  if (event === "capitol") pts += R.capitol;           // the real goal: reaching the Capitol
+  if (event === "scandal") pts += R.scandal;           // a scandal ends the campaign
+  if (event === "donor")   pts += R.donor;             // donor money, paid out once per game
+  if (event === "rally")   pts += R.rally;             // a rally; the stage reopens after 3 moves
+  if (event === "donorAgain") pts += R.donorAgain;     // going back to the donor office again
+  return pts;
+}
+
+// ---------- The game ----------
+// A state is: where you are, whether the donor has paid yet, and how many moves until the rally reopens.
+function newGame() { return { pos: START.slice(), donorDone: false, rallyWait: 0, moves: 0, over: false, result: "", rallies: 0, donorVisits: 0, score: 0 }; }
+
+function step(g, action) {
+  const [dr, dc] = DELTA[action];
+  let r = g.pos[0]+dr, c = g.pos[1]+dc;
+  // walls and edges: you stay put (but the move still counts)
+  if (r<0 || r>=ROWS || c<0 || c>=COLS || MAP[r][c]==="#") { r = g.pos[0]; c = g.pos[1]; }
+  g.pos = [r, c];
+  g.moves++;
+  if (g.rallyWait > 0) g.rallyWait--;
+  let event = "";
+  const ch = MAP[r][c];
+  if (ch === "C") { event = "capitol"; g.over = true; g.result = "capitol"; }
+  else if (ch === "S") { event = "scandal"; g.over = true; g.result = "scandal"; }
+  else if (ch === "D") { if (g.donorDone) { event = "donorAgain"; g.donorVisits++; } else { event = "donor"; g.donorDone = true; } }
+  else if (ch === "R" && g.rallyWait === 0) { event = "rally"; g.rallies++; g.rallyWait = RALLY_COOLDOWN; }
+  if (!g.over && g.moves >= MAX_MOVES) { g.over = true; g.result = "timeout"; }
+  const pts = reward(g, event);
+  g.score += pts;
+  return pts;
+}
+
+// Encode the state as a single number so it can index the Q-table.
+// 30 squares × 2 (donor) × 4 (rally wait 0..3) = 240 states.
+function stateId(g) { return ((g.pos[0]*COLS + g.pos[1]) * 2 + (g.donorDone?1:0)) * (RALLY_COOLDOWN+1) + g.rallyWait; }
+const N_STATES = ROWS * COLS * 2 * (RALLY_COOLDOWN + 1);
+
+// ---------- Seeded random numbers (so runs are reproducible) ----------
+function mulberry32(seed) { let a = seed >>> 0; return function() { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+// ---------- The learner: tabular Q-learning ----------
+function newAgent(params) {
+  const p = Object.assign({ epsilon: 0.2, alpha: 0.2, gamma: 0.95, seed: 158 }, params);
+  return { p, rand: mulberry32(p.seed), Q: Array.from({length: N_STATES}, () => [0,0,0,0]), games: 0, history: [] };
+}
+
+function bestAction(agent, s, rand = agent.rand) {
+  const q = agent.Q[s];
+  const max = Math.max(...q);
+  const ties = [];
+  for (let i=0;i<4;i++) if (q[i] === max) ties.push(i);
+  return ties[Math.floor(rand() * ties.length)];   // ties broken at random
+}
+
+function trainEpisode(agent) {
+  const g = newGame();
+  const { epsilon, alpha, gamma } = agent.p;
+  while (!g.over) {
+    const s = stateId(g);
+    // ε-greedy: explore with probability ε, otherwise exploit what it knows
+    const a = agent.rand() < epsilon ? Math.floor(agent.rand()*4) : bestAction(agent, s);
+    const r = step(g, ACTIONS[a]);
+    const s2 = stateId(g);
+    const target = g.over ? r : r + gamma * Math.max(...agent.Q[s2]);
+    agent.Q[s][a] += alpha * (target - agent.Q[s][a]);   // <-- the Q-learning update
+  }
+  agent.games++;
+  return g;
+}
+
+function train(agent, n) {
+  for (let i=0;i<n;i++) {
+    const g = trainEpisode(agent);
+    agent.history.push({ score: g.score, win: g.result === "capitol" ? 1 : 0, rallies: g.rallies });
+  }
+}
+
+// Play one game with no exploring: what the agent has actually learned. Returns the list of positions.
+// Uses its own random numbers so watching never changes what the agent learns next.
+function greedyGame(agent) {
+  const rand = mulberry32(agent.p.seed + 1);
+  const g = newGame(); const path = [g.pos.slice()];
+  while (!g.over) { step(g, ACTIONS[bestAction(agent, stateId(g), rand)]); path.push(g.pos.slice()); }
+  return { game: g, path };
+}
+
+function describe(g) {
+  if (g.result === "capitol") return `Capitol in ${g.moves} moves` + (g.rallies ? ` (${g.rallies} rallies)` : "");
+  if (g.result === "scandal") return `Scandal after ${g.moves} moves`;
+  if (g.rallies >= 3) return `Camped at the rally stage: ${g.rallies} rallies`;
+  if (g.donorVisits >= 3) return `Kept going back to the donor: ${g.donorVisits + 1} visits`;
+  return `Wandered for ${g.moves} moves`;
+}
+
+// Learning-curve data: average of every 50 training games.
+function curveData(agent, bucket = 50) {
+  const out = [];
+  for (let i=0; i+bucket<=agent.history.length; i+=bucket) {
+    const slice = agent.history.slice(i, i+bucket);
+    const mean = k => slice.reduce((s,h)=>s+h[k],0)/slice.length;
+    out.push({ score: mean("score"), win: mean("win"), rallies: mean("rallies") });
+  }
+  return out;
+}
+
+if (typeof module !== "undefined") module.exports = { R, REWARD_PRESETS, newAgent, train, greedyGame, describe, curveData, N_STATES, newGame, step, ACTIONS, MAP };
+</script>
+
+<!-- ================= UI: everything that touches the page ================= -->
+<script>
+const $ = id => document.getElementById(id);
+const ARROW = { up:"↑", down:"↓", left:"←", right:"→" };
+
+function drawBoard(el, marker, agent) {
+  el.innerHTML = "";
+  for (let r=0;r<ROWS;r++) for (let c=0;c<COLS;c++) {
+    const ch = MAP[r][c], d = document.createElement("div");
+    d.className = "cell" + (ch==="#" ? " wall" : "") + (["S","C","D","R"].includes(ch) ? " "+ch : "");
+    if (ch !== "." && ch !== "#") d.textContent = ch;
+    if (marker && marker[0]===r && marker[1]===c) d.classList.add(el.id==="humanBoard" ? "player" : "agent");
+    if (agent && ch !== "#" && ch !== "C" && ch !== "S") {
+      const s = stateId({ pos:[r,c], donorDone:false, rallyWait:0 });
+      const q = agent.Q[s];
+      if (q.some(v => v !== 0)) {
+        const best = q.indexOf(Math.max(...q));
+        const a = document.createElement("span"); a.className = "arrow"; a.textContent = ARROW[ACTIONS[best]]; d.appendChild(a);
+        const v = Math.max(...q); d.style.background = v > 0 ? `rgba(22,163,74,${Math.min(0.5, v/20)})` : `rgba(220,38,38,${Math.min(0.5, -v/10)})`;
+      }
+    }
+    el.appendChild(d);
+  }
+}
+
+// ---- Human play ----
+let human = newGame(), best = null;
+function humanRender() {
+  drawBoard($("humanBoard"), human.pos);
+  $("hScore").textContent = human.score.toFixed(1);
+  $("hMoves").textContent = `${human.moves} / ${MAX_MOVES}`;
+  $("hStatus").textContent = human.over ? (human.result==="capitol" ? "Reached the Capitol!" : human.result==="scandal" ? "Scandal — campaign over" : "Election day: out of moves") : "On the trail";
+  $("hBest").textContent = best === null ? "–" : best.toFixed(1) + " points";
+}
+function humanMove(dir) { if (human.over) return; step(human, dir); if (human.over) best = best===null ? human.score : Math.max(best, human.score); humanRender(); }
+document.querySelectorAll(".dpad button").forEach(b => b.onclick = () => humanMove(b.dataset.dir));
+document.addEventListener("keydown", e => { const m = { ArrowUp:"up", ArrowDown:"down", ArrowLeft:"left", ArrowRight:"right" }[e.key]; if (m) { e.preventDefault(); humanMove(m); } });
+$("humanNew").onclick = () => { human = newGame(); humanRender(); };
+
+// ---- Reward and settings controls ----
+const rewardInputs = { capitol:"rCapitol", move:"rMove", scandal:"rScandal", donor:"rDonor", rally:"rRally", donorAgain:"rDonorAgain" };
+function loadRewardInputs() { for (const k in rewardInputs) $(rewardInputs[k]).value = R[k]; }
+function readRewardInputs() { for (const k in rewardInputs) R[k] = parseFloat($(rewardInputs[k]).value) || 0; }
+$("preset").onchange = () => { Object.assign(R, REWARD_PRESETS[$("preset").value]); loadRewardInputs(); resetAgent(); };
+for (const k in rewardInputs) $(rewardInputs[k]).onchange = () => { readRewardInputs(); resetAgent(); };
+["pEps","pAlpha","pGamma","pSeed"].forEach(id => $(id).onchange = resetAgent);
+$("stateCount").textContent = N_STATES;
+
+// ---- Agent ----
+let agent;
+function resetAgent() {
+  agent = newAgent({ epsilon: +$("pEps").value, alpha: +$("pAlpha").value, gamma: +$("pGamma").value, seed: +$("pSeed").value });
+  agentRender(null);
+}
+function agentRender(marker) {
+  drawBoard($("agentBoard"), marker, agent);
+  $("aGames").textContent = agent.games.toLocaleString();
+  if (agent.games > 0) { const { game } = greedyGame(agent); $("aResult").textContent = describe(game); $("aPoints").textContent = game.score.toFixed(1); }
+  else { $("aResult").textContent = "–"; $("aPoints").textContent = "–"; }
+  drawCurve();
+}
+$("train100").onclick = () => { train(agent, 100); agentRender(null); };
+$("train1000").onclick = () => { train(agent, 1000); agentRender(null); };
+$("resetAgent").onclick = resetAgent;
+$("watch").onclick = () => {
+  const { path } = greedyGame(agent); let i = 0;
+  const t = setInterval(() => { agentRender(path[i]); if (++i >= path.length) clearInterval(t); }, 180);
+};
+
+// ---- Learning curve ----
+function drawCurve() {
+  const cv = $("curve"), ctx = cv.getContext("2d"), W = cv.width, H = cv.height, pad = 34;
+  ctx.clearRect(0,0,W,H);
+  const data = curveData(agent);
+  ctx.fillStyle = "#6b7280"; ctx.font = "11px system-ui";
+  if (data.length < 1) { ctx.fillText("Train at least 50 games to see the curve.", pad, H/2); return; }
+  const lo = Math.min(-5, ...data.map(d=>d.score)), hi = Math.max(12, ...data.map(d=>d.score));
+  const maxR = Math.max(1, ...data.map(d=>d.rallies));
+  const x = i => pad + (W-2*pad) * (data.length===1 ? 0 : i/(data.length-1));
+  const yS = v => H-pad - (H-2*pad) * (v-lo)/(hi-lo);
+  const yP = v => H-pad - (H-2*pad) * v;            // 0..1
+  const yR = v => H-pad - (H-2*pad) * v/maxR;
+  ctx.strokeStyle = "#e5e7eb"; ctx.beginPath(); ctx.moveTo(pad, yS(0)); ctx.lineTo(W-pad, yS(0)); ctx.stroke();
+  ctx.fillText(hi.toFixed(0), 4, pad+4); ctx.fillText("0", 4, yS(0)+4); ctx.fillText(lo.toFixed(0), 4, H-pad);
+  ctx.fillText("100%", W-pad+4, pad+4); ctx.fillText("0%", W-pad+4, H-pad);
+  ctx.fillText(`${agent.games.toLocaleString()} games`, W-pad-50, H-8); ctx.fillText("0", pad, H-8);
+  const line = (fn, key, color) => { ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath(); data.forEach((d,i) => i ? ctx.lineTo(x(i), fn(d[key])) : ctx.moveTo(x(i), fn(d[key]))); ctx.stroke(); };
+  line(yR, "rallies", "#f59e0b"); line(yP, "win", "#16a34a"); line(yS, "score", "#2563eb");
+}
+
+loadRewardInputs(); humanRender(); resetAgent();
+</script>
+</body>
+</html>
